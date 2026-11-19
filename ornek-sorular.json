@@ -1,0 +1,24 @@
+[
+  {
+    "q": "HTML'de en büyük başlık etiketi hangisidir?",
+    "answers": [
+      "<h6>",
+      "<head>",
+      "<h1>",
+      "<title>"
+    ],
+    "correct": 2,
+    "time": 20
+  },
+  {
+    "q": "1 byte kaç bittir?",
+    "answers": [
+      "4",
+      "8",
+      "16",
+      "32"
+    ],
+    "correct": 1,
+    "time": 15
+  }
+]

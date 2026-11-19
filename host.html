@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Moderatör · Sidar Quiz</title>
+  <link rel="icon" href="assets/sprites/front_idle.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="host">
+  <main id="host-wrap">
+    <div class="crt"><canvas id="stage" width="960" height="540"></canvas></div>
+    <div id="bar">
+      <span id="status">Bağlanıyor…</span>
+      <label class="btn ghost" id="loadLabel" hidden>
+        Soru yükle (.json)
+        <input type="file" id="fileInput" accept=".json,application/json" hidden>
+      </label>
+      <button class="btn" id="btnStart" hidden disabled>Oyunu başlat</button>
+      <button class="btn alt" id="btnConfirm" hidden>Onayla · sonuçlar</button>
+      <button class="btn" id="btnNext" hidden>Devam</button>
+      <button class="btn" id="btnRestart" hidden>Yeni oyun</button>
+    </div>
+  </main>
+  <script src="vendor/peerjs.min.js"></script>
+  <script src="vendor/qrcode.js"></script>
+  <script src="js/common.js"></script>
+  <script src="js/questions.js"></script>
+  <script src="js/host.js"></script>
+</body>
+</html>

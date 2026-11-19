@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sidar Quiz</title>
+  <link rel="icon" href="assets/sprites/front_idle.png">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="landing">
+  <main>
+    <img src="assets/sprites/front_idle.png" alt="" class="hero">
+    <h1>SIDAR<br>QUIZ</h1>
+    <div class="window">
+      <p>Oyunu kur, ekranı projeksiyona yansıt. Oyuncular ekrandaki QR kodu telefonlarıyla okutarak katılır.</p>
+    </div>
+    <div class="choices">
+      <a class="btn big alt" id="hostLink" href="host.html">OYUN KUR</a>
+    </div>
+    <p class="press blink">BAŞLAMAK IÇIN BAS</p>
+  </main>
+  <script src="js/common.js"></script>
+  <script>
+    // Test parametrelerini (kendi PeerJS sunucusu vb.) bağlantıya taşı
+    const extra = QUIZ.passthroughParams().toString();
+    if (extra) document.getElementById('hostLink').href += '?' + extra;
+  </script>
+</body>
+</html>
