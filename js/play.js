@@ -174,7 +174,11 @@
   // Kopmayı fark etmek için: moderatör her saniye durum gönderir
   setInterval(() => {
     if (!joined) return;
-    if (conn && conn.open) sendInput(true);   // hem nabız hem güncel girdi
+    if (conn && conn.open) {
+      // Nabız her zaman güvenilir kanaldan da gider: hızlı kanal sessizce takılsa bile oyuncu kopmuş sayılmaz
+      conn.send({ t: 'hb' });
+      sendInput(true);
+    }
     if (performance.now() - lastStatusAt > 8000) scheduleReconnect();
   }, 2000);
 
@@ -350,27 +354,46 @@
     stick.classList.toggle('up', stickState.up);
     updateInput();
   }
-  function stickEnd(e) {
-    if (e && stickPointer !== e.pointerId) return;
+  function stickEnd() {
     stickPointer = null;
     stickState.x = 0; stickState.up = false;
     knob.style.transform = '';
     stick.classList.remove('active', 'up');
     updateInput();
   }
-  // Sol tarafın tamamı dokunma alanı: parmak çubuğun tam üstüne gelmese de çalışır
+  // Sol tarafın tamamı dokunma alanı: parmak çubuğun tam üstüne gelmese de çalışır.
+  // Telefonlarda klasik dokunma olayları (touch) kullanılır: iOS Safari dahil her tarayıcıda parmak
+  // alandan çıksa bile takip edilir ve "pointer capture" farklılıklarından etkilenmez.
   const stickArea = document.querySelector('.side.left');
-  stickArea.addEventListener('pointerdown', (e) => {
+  const findTouch = (list, id) => { for (const t of list) if (t.identifier === id) return t; return null; };
+  stickArea.addEventListener('touchstart', (e) => {
     e.preventDefault();
-    stickPointer = e.pointerId;
-    stickArea.setPointerCapture(e.pointerId);
+    if (stickPointer !== null) return;
+    const t = e.changedTouches[0];
+    stickPointer = t.identifier;
+    stick.classList.add('active');
+    stickMove(t);
+  }, { passive: false });
+  stickArea.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    const t = findTouch(e.changedTouches, stickPointer);
+    if (t) stickMove(t);
+  }, { passive: false });
+  const touchEnd = (e) => { if (findTouch(e.changedTouches, stickPointer)) stickEnd(); };
+  stickArea.addEventListener('touchend', touchEnd);
+  stickArea.addEventListener('touchcancel', touchEnd);
+
+  // Fare (bilgisayardan katılanlar ve test için)
+  stickArea.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    stickPointer = 'mouse';
     stick.classList.add('active');
     stickMove(e);
+    const move = (ev) => stickMove(ev);
+    const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); stickEnd(); };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
   });
-  stickArea.addEventListener('pointermove', (e) => { if (e.pointerId === stickPointer) stickMove(e); });
-  stickArea.addEventListener('pointerup', stickEnd);
-  stickArea.addEventListener('pointercancel', stickEnd);
-  stickArea.addEventListener('lostpointercapture', stickEnd);
   stickArea.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // --- A (zıpla) düğmesi ---
@@ -408,7 +431,7 @@
   });
   window.addEventListener('blur', () => releaseAll());
   function releaseAll() {
-    stickEnd({ pointerId: stickPointer });
+    stickEnd();
     aHeld = false; aBtn.classList.remove('down');
     keys.l = keys.r = keys.j = false;
     updateInput();
@@ -416,7 +439,7 @@
 
   // Ekran dik/yatay değişince basılı kalmış her şeyi bırak
   window.addEventListener('orientationchange', () => {
-    stickEnd({ pointerId: stickPointer });
+    stickEnd();
     aHeld = false; aBtn.classList.remove('down');
     keys.l = keys.r = keys.j = false;
     updateInput();

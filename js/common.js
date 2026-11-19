@@ -3,7 +3,7 @@
 
 const QUIZ = {
   // Moderatör ve telefon aynı sürümü çalıştırmalı (eski önbellekli dosyalar karışmasın)
-  VERSION: '2026.11.19b',
+  VERSION: '2026.11.19d',
 
   // PeerJS kimliklerinin başına eklenir; başka uygulamalarla çakışmayı önler.
   ROOM_PREFIX: 'sidar-quiz-',
