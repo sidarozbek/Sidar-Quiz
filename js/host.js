@@ -11,25 +11,29 @@
   const PAD_W = 192, PAD_GAP = 40, PAD_H = 20;
   const PAD_Y = FLOOR_Y - 128;
   const PAD_X0 = (W - (4 * PAD_W + 3 * PAD_GAP)) / 2;
-  const PADS = [0, 1, 2, 3].map((i) => ({ x: PAD_X0 + i * (PAD_W + PAD_GAP), y: PAD_Y, w: PAD_W }));
+  const PADS = [0, 1, 2, 3].map((i) => ({ x: PAD_X0 + i * (PAD_W + PAD_GAP), y: PAD_Y, w: PAD_W, dropT: -1, dy: 0 }));
 
   const GRAVITY = 1900, WALK_SPEED = 230, ACCEL = 2000, FRICTION = 2200;
   const JUMP_SPEED = 740, MAX_FALL = 900, COYOTE = 0.1, BUFFER = 0.12;
   const PW = 22, PH = 84, FOOT_ROW = 109, SPRITE_CX = 64;
 
-  const COUNTDOWN = 3;
+  const READ_MIN = 3, READ_MAX = 8;   // soruyu okuma süresi (sn), metin uzunluğuna göre
+  const GRACE = 0.5;                   // ilk 0,5 sn içinde karar verene tam puan (Kahoot gibi)
+  const DROP_AT = 0.7, SHOW_AT = 1.3;  // açıklama: yanlış platformların çöküşü ve doğru cevabın gösterimi
   const DEFAULT_TIME = 20;
   const MAX_POINTS = 1000;
   const TIMEOUT_MS = 7000;
 
   const canvas = document.getElementById('stage');
-  const ctx = canvas.getContext('2d');
+  const screenCtx = canvas.getContext('2d', { alpha: false });
+  let ctx = screenCtx;
   ctx.imageSmoothingEnabled = false;
 
   const $ = (id) => document.getElementById(id);
   const ui = {
     status: $('status'), start: $('btnStart'), confirm: $('btnConfirm'),
     next: $('btnNext'), restart: $('btnRestart'), load: $('loadLabel'), file: $('fileInput'),
+    pause: $('btnPause'), time: $('btnTime'), skip: $('btnSkip'), lock: $('btnLock'), sound: $('btnSound'),
   };
 
   // ---------------------------------------------------------------------------
@@ -200,18 +204,43 @@
   let qrImage = null;
   let peer = null;
   let elapsed = 0;
+  let readTime = 4;
+  let paused = false, resumeAt = 0, autoPaused = false;
+  let joinLocked = false;
+  let revealShown = false;
+  let lastTickSec = -1;
+  const kicked = new Set();
+  const isDouble = () => questions.length >= 3 && qIndex === questions.length - 1;   // son soru 2x puan
+  const AUDIO = window.SidarAudio || { sfx() {}, play() {}, stop() {}, unlock() {}, setTempo() {}, toggle() { return false; }, enabled: false };
 
   const currentQ = () => questions[qIndex];
 
   function setPhase(p) {
     phase = p;
     phaseTime = 0;
+    onPhaseEnter(p);
     updateButtons();
     for (const pl of players.values()) sendStatus(pl);
   }
 
+  function onPhaseEnter(p) {
+    if (p === 'lobby') AUDIO.play('lobby');
+    else if (p === 'read') { AUDIO.play('question'); AUDIO.setTempo(1); }
+    else if (p === 'question') AUDIO.sfx('go');
+    else if (p === 'reveal') { AUDIO.stop(); AUDIO.sfx('lock'); revealShown = false; }
+    else if (p === 'leaderboard') { AUDIO.sfx('whoosh'); }
+    else if (p === 'final') AUDIO.play('fanfare');
+  }
+
   function updateButtons() {
     const show = (el, on) => { el.hidden = !on; };
+    const live = phase === 'read' || phase === 'question';
+    show(ui.pause, live);
+    show(ui.time, phase === 'question');
+    show(ui.skip, live);
+    ui.pause.textContent = paused ? 'Devam' : 'Duraklat';
+    ui.lock.textContent = joinLocked ? 'Katılım: kilitli' : 'Katılım: açık';
+    ui.sound.textContent = AUDIO.enabled ? 'Ses: açık' : 'Ses: kapalı';
     show(ui.start, phase === 'lobby');
     show(ui.load, phase === 'lobby');
     show(ui.confirm, phase === 'question');
@@ -244,6 +273,7 @@
     });
 
     peer.on('connection', (conn) => {
+      conn.on('open', () => setupFast(conn));
       conn.on('data', (msg) => onMessage(conn, msg));
       conn.on('close', () => onClose(conn));
       conn.on('error', () => onClose(conn));
@@ -282,6 +312,74 @@
     });
   }
 
+  // Girdi için ayrı, sırasız ve kayıplı veri kanalı: kaybolan bir paket sonrakileri bekletmez.
+  // Her iki taraf da aynı id ile "negotiated" kanal açar; PeerJS'in kendi kanalı olaylar için kalır.
+  function setupFast(conn) {
+    try {
+      const ch = conn.peerConnection.createDataChannel('fast', { negotiated: true, id: 5, ordered: false, maxRetransmits: 0 });
+      conn._fast = ch;
+      ch.onmessage = (e) => {
+        let m;
+        try { m = JSON.parse(e.data); } catch (err) { return; }
+        const p = conn._player;
+        if (!p || p.conn !== conn) return;
+        p.lastSeen = performance.now();
+        if (m.t === 'i') {
+          if (typeof m.s === 'number') {
+            if (m.s <= p.lastSeq) return;   // eski paket: at
+            p.lastSeq = m.s;
+          }
+          applyInput(p, m);
+        } else if (m.t === 'o') onPong(p, m.ts);
+      };
+    } catch (e) { conn._fast = null; }
+  }
+
+  function sendFast(p, msg) {
+    const ch = p.conn && p.conn._fast;
+    if (ch && ch.readyState === 'open') {
+      try { ch.send(JSON.stringify(msg)); return true; } catch (e) { /* yedek yola düş */ }
+    }
+    return false;
+  }
+
+  function applyInput(p, m) {
+    const x = typeof m.x === 'number' && isFinite(m.x) ? Math.max(-1, Math.min(1, m.x)) : undefined;
+    const j = !!m.j;
+    // Zıplama sayacı: kayıp pakette kısa bir dokunuş kaybolmasın
+    if (typeof m.jc === 'number') {
+      if (p.lastJc !== null && m.jc > p.lastJc) p.jumpPressed = true;
+      if (p.lastJc === null || m.jc > p.lastJc) p.lastJc = m.jc;
+    } else if (j && !p.input.j) p.jumpPressed = true;
+    p.input = { l: !!m.l, r: !!m.r, j, x };
+  }
+
+  function onPong(p, ts) {
+    if (typeof ts !== 'number') return;
+    const rtt = performance.now() - ts;
+    p.rtt = p.rtt ? p.rtt * 0.7 + rtt * 0.3 : rtt;
+  }
+
+  // Bağlantı türü (LAN / NAT / TURN): getStats ile seçili aday çifti
+  async function pollLink(p) {
+    const pc = p.conn && p.conn.peerConnection;
+    if (!pc || !pc.getStats) return;
+    try {
+      const stats = await pc.getStats();
+      let pair = null;
+      stats.forEach((r) => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId); });
+      if (!pair) stats.forEach((r) => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
+      if (!pair) return;
+      const l = stats.get(pair.localCandidateId), r = stats.get(pair.remoteCandidateId);
+      if (!l || !r) return;
+      if (l.candidateType === 'relay' || r.candidateType === 'relay') {
+        const proto = (l.relayProtocol || 'udp').toUpperCase();
+        p.link = proto === 'UDP' ? 'TURN' : 'TURN-' + proto;
+      } else if (l.candidateType === 'host' && r.candidateType === 'host') p.link = 'LAN';
+      else p.link = 'NAT';
+    } catch (e) { /* desteklenmiyor */ }
+  }
+
   function send(p, msg) {
     if (p.conn && p.conn.open) {
       try { p.conn.send(msg); } catch (e) { /* bağlantı kapanıyor olabilir */ }
@@ -298,6 +396,16 @@
       const name = String(msg.name || '').trim().slice(0, 12) || 'Oyuncu';
       const char = CHAR_IDS.includes(msg.char) ? msg.char : CHAR_IDS[0];
       p = players.get(token);
+      if (kicked.has(token)) {
+        conn.send({ t: 'error', msg: 'Moderatör seni bu oyundan çıkardı.' });
+        setTimeout(() => conn.close(), 500);
+        return;
+      }
+      if (!p && joinLocked) {
+        conn.send({ t: 'error', msg: 'Moderatör katılımı kilitledi.' });
+        setTimeout(() => conn.close(), 500);
+        return;
+      }
       if (!p) {
         if (players.size >= QUIZ.MAX_PLAYERS) {
           conn.send({ t: 'error', msg: 'Oda dolu (en fazla ' + QUIZ.MAX_PLAYERS + ' oyuncu).' });
@@ -306,11 +414,14 @@
         }
         p = createPlayer(token, uniqueName(name), char);
         players.set(token, p);
+        AUDIO.sfx('join');
       } else if (p.conn && p.conn !== conn) {
         p.conn._player = null;
         try { p.conn.close(); } catch (e) { /* zaten kapalı */ }
       }
       p.char = char;
+      p.lastSeq = 0;
+      p.lastJc = null;
       p.conn = conn;
       p.connected = true;
       p.lastSeen = performance.now();
@@ -322,11 +433,8 @@
     }
 
     if (!p) return;
-    if (msg.t === 'in') {
-      const j = !!msg.j;
-      if (j && !p.input.j) p.jumpPressed = true;
-      p.input = { l: !!msg.l, r: !!msg.r, j };
-    }
+    if (msg.t === 'in') applyInput(p, msg);
+    else if (msg.t === 'pong') onPong(p, msg.ts);
   }
 
   function onClose(conn) {
@@ -357,7 +465,9 @@
       input: { l: false, r: false, j: false },
       anim: 'stand', animTime: 0,
       zone: -1, zoneSince: 0,
-      score: 0, lastPoints: 0, lastAnswer: -1,
+      score: 0, lastPoints: 0, lastAnswer: -1, streak: 0,
+      lastSeq: 0, lastJc: null, rtt: 0, link: '',
+      px: 0, py: 0, rx: 0, ry: 0,
     };
     spawn(p, players.size);
     return p;
@@ -370,6 +480,7 @@
     p.x = Math.max(4, Math.min(W - PW - 4, p.x));
     p.y = FLOOR_Y - PH - 40;
     p.vx = 0; p.vy = 0;
+    p.px = p.rx = p.x; p.py = p.ry = p.y;
     p.zone = -1; p.zoneSince = 0;
   }
 
@@ -387,10 +498,15 @@
       n: questions.length,
       zone: p.zone,
       time: phase === 'question' ? Math.max(0, Math.ceil(qTime - qElapsed)) : 0,
+      paused,
+      streak: p.streak,
+      double: isDouble(),
       score: p.score,
       rank: rankOf(p),
+      ping: p.rtt ? Math.round(p.rtt) : null,
       total: players.size,
-      last: (phase === 'reveal' || phase === 'leaderboard') && q
+      // Sonuç telefonda büyük ekrandan önce görünmesin
+      last: ((phase === 'reveal' && revealShown) || phase === 'leaderboard') && q
         ? { answer: p.lastAnswer, points: p.lastPoints, correct: q.correct }
         : null,
     });
@@ -400,8 +516,9 @@
   // Oyun akışı
   // ---------------------------------------------------------------------------
   function startGame() {
-    for (const p of players.values()) { p.score = 0; p.lastPoints = 0; p.lastAnswer = -1; }
+    for (const p of players.values()) { p.score = 0; p.lastPoints = 0; p.lastAnswer = -1; p.streak = 0; }
     qIndex = -1;
+    requestWakeLock();
     nextQuestion();
   }
 
@@ -410,9 +527,14 @@
     if (qIndex >= questions.length) { setPhase('final'); return; }
     qTime = Number(currentQ().time) || DEFAULT_TIME;
     qElapsed = 0;
+    lastTickSec = -1;
+    // Okuma süresi: saniyede ~15 karakter, 3-8 sn arası
+    readTime = Math.max(READ_MIN, Math.min(READ_MAX, String(currentQ().q).length / 15));
+    for (const pad of PADS) { pad.dropT = -1; pad.dy = 0; }
+    paused = false; resumeAt = 0;
     let i = 0;
     for (const p of players.values()) spawn(p, i++);
-    setPhase('countdown');
+    setPhase('read');
   }
 
   function lockAnswers() {
@@ -420,10 +542,13 @@
     for (const p of players.values()) {
       p.lastAnswer = p.zone;
       if (p.zone === q.correct) {
-        const t = Math.min(1, p.zoneSince / qTime);
-        p.lastPoints = Math.round(MAX_POINTS * (1 - 0.5 * t));
+        // Kahoot formülü: en az yarım puan; son kez platforma yerleşme anı sayılır, ilk 0,5 sn tam puan
+        const t = Math.min(1, Math.max(0, p.zoneSince - GRACE) / qTime);
+        p.lastPoints = Math.round(MAX_POINTS * (1 - 0.5 * t)) * (isDouble() ? 2 : 1);
+        p.streak++;
       } else {
         p.lastPoints = 0;
+        p.streak = 0;
       }
       p.score += p.lastPoints;
     }
@@ -431,20 +556,99 @@
   }
 
   function primaryAction() {
+    if (paused) { togglePause(); return; }
     if (phase === 'lobby' && !ui.start.disabled) startGame();
+    else if (phase === 'read') { phaseTime = readTime; }              // okumayı kısalt
     else if (phase === 'question') lockAnswers();
+    else if (phase === 'reveal' && !revealShown) { phaseTime = SHOW_AT; }   // açıklamayı hızlandır
     else if (phase === 'reveal') setPhase('leaderboard');
     else if (phase === 'leaderboard') nextQuestion();
     else if (phase === 'final') restart();
   }
 
   function restart() {
-    for (const p of players.values()) { p.score = 0; p.lastPoints = 0; p.lastAnswer = -1; }
+    for (const p of players.values()) { p.score = 0; p.lastPoints = 0; p.lastAnswer = -1; p.streak = 0; }
+    for (const pad of PADS) { pad.dropT = -1; pad.dy = 0; }
     qIndex = -1;
     let i = 0;
     for (const p of players.values()) spawn(p, i++);
     setPhase('lobby');
   }
+
+  // --- Moderatör kontrolleri ---
+  function togglePause() {
+    if (!(phase === 'read' || phase === 'question')) return;
+    if (paused) { if (!resumeAt) resumeAt = performance.now() + 3000; }   // 3-2-1 ile devam
+    else { paused = true; resumeAt = 0; AUDIO.stop(); AUDIO.sfx('pause'); }
+    autoPaused = false;
+    updateButtons();
+    for (const p of players.values()) sendStatus(p);
+  }
+  function addTime() { if (phase === 'question') { qTime += 10; lastTickSec = -1; } }
+  function skipQuestion() {
+    if (!(phase === 'read' || phase === 'question')) return;
+    for (const p of players.values()) { p.lastPoints = 0; p.lastAnswer = -1; }
+    paused = false; resumeAt = 0;
+    nextQuestion();
+  }
+  function toggleLock() { joinLocked = !joinLocked; updateButtons(); }
+  function toggleSound() { AUDIO.unlock(); AUDIO.toggle(); if (AUDIO.enabled) onPhaseEnter(phase); updateButtons(); }
+  function kick(p) {
+    kicked.add(p.token);
+    send(p, { t: 'kicked' });
+    setTimeout(() => { try { p.conn && p.conn.close(); } catch (e) { /* kapalı */ } }, 300);
+    players.delete(p.token);
+    updateButtons();
+  }
+  ui.pause.addEventListener('click', togglePause);
+  ui.time.addEventListener('click', addTime);
+  ui.skip.addEventListener('click', skipQuestion);
+  ui.lock.addEventListener('click', toggleLock);
+  ui.sound.addEventListener('click', toggleSound);
+
+  // Karaktere tıklayınca oyundan çıkarma
+  canvas.addEventListener('click', (e) => {
+    const r = canvas.getBoundingClientRect();
+    const x = (e.clientX - r.left) * (W / r.width), y = (e.clientY - r.top) * (H / r.height);
+    for (const p of players.values()) {
+      if (x >= p.x - 18 && x <= p.x + PW + 18 && y >= p.y - 26 && y <= p.y + PH) {
+        if (confirm(`${p.name} oyundan çıkarılsın mı?`)) kick(p);
+        return;
+      }
+    }
+  });
+
+  // Sekme gizlenince oyun kendiliğinden duraklar (tarayıcı gizli sekmede çizimi durdurur)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && (phase === 'read' || phase === 'question') && !paused) {
+      togglePause();
+      autoPaused = true;
+    }
+    if (document.visibilityState === 'visible') requestWakeLock();
+  });
+
+  // Ekran kararmasın (projeksiyon bilgisayarı)
+  let wakeLock = null;
+  async function requestWakeLock() {
+    try { if (navigator.wakeLock && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) { /* desteklenmiyor */ }
+  }
+
+  // İlk tıklamada sesi aç (tarayıcı kuralı)
+  const unlockAudio = () => { if (!AUDIO.running) { AUDIO.unlock(); setTimeout(() => onPhaseEnter(phase), 50); } requestWakeLock(); };
+  window.addEventListener('pointerdown', unlockAudio);
+  window.addEventListener('keydown', unlockAudio);
+
+  // Kısayollar
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.code === 'KeyP') togglePause();
+    else if (e.code === 'KeyT') addTime();
+    else if (e.code === 'KeyS') skipQuestion();
+    else if (e.code === 'KeyL') toggleLock();
+    else if (e.code === 'KeyM') toggleSound();
+    else if (e.code === 'KeyC') document.querySelector('.crt').classList.toggle('no-crt');
+    else if (e.code === 'KeyZ') { pixelPerfect = !pixelPerfect; resize(); }
+  });
 
   ui.start.addEventListener('click', startGame);
   ui.confirm.addEventListener('click', lockAnswers);
@@ -489,13 +693,14 @@
   // Fizik
   // ---------------------------------------------------------------------------
   const approach = (v, t, a) => (v < t ? Math.min(v + a, t) : Math.max(v - a, t));
-  const canMove = () => phase === 'lobby' || phase === 'question';
+  const canMove = () => !paused && (phase === 'lobby' || phase === 'read' || phase === 'question');
 
   function updatePlayer(p, dt) {
     const inp = canMove() && p.connected ? p.input : { l: false, r: false, j: false };
     if (!canMove()) p.jumpPressed = false;
-    const dir = (inp.r ? 1 : 0) - (inp.l ? 1 : 0);
-    if (dir) { p.vx = approach(p.vx, dir * WALK_SPEED, ACCEL * dt); p.facing = dir; }
+    // Analog çubuk: x = -1..1 (hız orantılı); eski tuşlu istemciler için l/r
+    const dir = typeof inp.x === 'number' ? Math.max(-1, Math.min(1, inp.x)) : (inp.r ? 1 : 0) - (inp.l ? 1 : 0);
+    if (dir) { p.vx = approach(p.vx, dir * WALK_SPEED, ACCEL * dt); p.facing = Math.sign(dir); }
     else p.vx = approach(p.vx, 0, FRICTION * dt);
 
     p.coyote = p.onGround ? COYOTE : p.coyote - dt;
@@ -515,6 +720,7 @@
       const bottom = p.y + PH;
       for (let i = 0; i < PADS.length; i++) {
         const pad = PADS[i];
+        if (pad.dropT >= 0) continue;   // çöken platform artık zemin değil
         const cx = p.x + PW / 2;
         if (cx >= pad.x && cx <= pad.x + pad.w && prevBottom <= pad.y + 1 && bottom >= pad.y) {
           p.y = pad.y - PH; p.vy = 0; p.onGround = true; p.surface = i;
@@ -580,7 +786,18 @@
   }
 
   // Metni kutuya sığana kadar küçült (piksel fontlar için 2'şer adım)
+  const fitCache = new Map();
   function fitText(str, maxW, maxH, startSize, minSize, fontFn = FB) {
+    const key = `${str}|${maxW}|${maxH}|${startSize}|${minSize}|${fontFn === FT ? 't' : 'b'}`;
+    let hit = fitCache.get(key);
+    if (!hit) {
+      hit = fitTextRaw(str, maxW, maxH, startSize, minSize, fontFn);
+      if (fitCache.size > 500) fitCache.clear();
+      fitCache.set(key, hit);
+    }
+    return hit;
+  }
+  function fitTextRaw(str, maxW, maxH, startSize, minSize, fontFn) {
     for (let s = startSize; s >= minSize; s -= 2) {
       const lines = wrap(str, maxW, fontFn(s));
       const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
@@ -622,11 +839,12 @@
   // ---------------------------------------------------------------------------
   // Çizim
   // ---------------------------------------------------------------------------
-  function drawPad(i, dim) {
+  function drawPad(i) {
     const pad = PADS[i], a = QUIZ.ANSWERS[i];
-    const x = pad.x, y = pad.y, w = pad.w;
-    // Destek ayakları
-    const legH = FLOOR_Y - y - PAD_H;
+    const x = pad.x, y = Math.round(pad.y + pad.dy), w = pad.w;
+    if (y > H) return;
+    // Destek ayakları (platform çökerken onlar da düşer)
+    const legH = FLOOR_Y - pad.y - PAD_H;
     for (const lx of [x + 12, x + w - 18]) {
       rect(ctx, P.ink, lx, y + PAD_H - 2, 6, legH + 2);
       rect(ctx, a.light, lx + 2, y + PAD_H - 2, 2, legH + 2);
@@ -637,7 +855,22 @@
       rect(ctx, a.light, x, y, w, 4);
       rect(ctx, a.dark, x, y + PAD_H - 6, w, 6);
     }
-    if (dim) dither(x - 2, y - 2, w + 4, FLOOR_Y - y + 2, false);
+    // Büyük harf rozeti: renk körü ve uzaktaki izleyici için rengin yanında ikinci işaret
+    const bw = 36, bh = 32, bx = x + w / 2 - bw / 2, by = y + PAD_H / 2 - bh / 2 + 4;
+    box(bx - 2, by - 2, bw + 4, bh + 4, P.ink, 4);
+    box(bx, by, bw, bh, a.color, 2);
+    rect(ctx, a.light, bx + 2, by, bw - 4, 3);
+    text(a.letter, bx + bw / 2, by + bh - 7, FT(16), a.text, 'center', a.text === P.ink ? null : a.dark);
+    // Canlı oyuncu sayısı (soru ve açıklama aşamasında)
+    if (phase === 'question' || phase === 'reveal') {
+      const n = phase === 'question' ? zoneCount[i] : answerCount[i];
+      if (n > 0) {
+        const label = 'x' + n;
+        const cw = 14 + label.length * 10, cx = x + w - cw - 6, cy = y - 22;
+        box(cx, cy, cw, 18, P.ink, 2);
+        text(label, cx + cw / 2, cy + 14, FT(10), P.white, 'center', null);
+      }
+    }
   }
 
   // Cevap tabelası (platformun üstünde, daha küçük)
@@ -649,7 +882,6 @@
     rect(ctx, P.ink, bx + bw / 2 - 4, by + bh - 4, 8, pad.y - by - bh + 4);
     rect(ctx, P.slate, bx + bw / 2 - 2, by + bh - 4, 2, pad.y - by - bh + 4);
 
-    if (highlight) box(bx - 6, by - 6, bw + 12, bh + 12, blink(6) ? P.white : P.yellow, 4);
     if (!drawNine('sign' + i, bx, by, bw, bh)) {
       windowBox(bx, by, bw, bh, a.color, { border: P.white, light: a.light, dark: a.dark, plain: true });
     }
@@ -662,70 +894,114 @@
     if (dim) dither(bx, by, bw, bh, true);
   }
 
+  // Doğru cevabın yanıp sönen çerçevesi (her karede, önbelleğin üstüne)
+  function drawHighlight(i) {
+    if (!revealShown) return;
+    const pad = PADS[i], bw = SIGN_W, bh = SIGN_H, bx = pad.x + (pad.w - bw) / 2, by = SIGN_Y;
+    const c = blink(6) ? P.white : P.yellow;
+    rect(ctx, c, bx - 6, by - 6, bw + 12, 4);
+    rect(ctx, c, bx - 6, by + bh + 2, bw + 12, 4);
+    rect(ctx, c, bx - 6, by - 2, 4, bh + 4);
+    rect(ctx, c, bx + bw + 2, by - 2, 4, bh + 4);
+  }
+
   function drawPlayer(p) {
     const a = ANIMS[p.anim];
     const frame = a.frames[Math.floor(p.animTime * a.fps) % a.frames.length];
     const im = img[p.char][frame];
-    const sx = Math.round(p.x + PW / 2);
-    const sy = Math.round(p.y + PH - FOOT_ROW);
+    const sx = Math.round(p.rx + PW / 2);
+    const sy = Math.round(p.ry + PH - FOOT_ROW);
     // Ayak altı gölgesi
-    if (p.onGround) rect(ctx, P.ink, sx - 14, Math.round(p.y + PH) - 2, 28, 2);
-    ctx.save();
+    if (p.onGround) rect(ctx, P.ink, sx - 14, Math.round(p.ry + PH) - 2, 28, 2);
     if (p.facing < 0 && p.anim !== 'stand') {
-      ctx.translate(sx, 0); ctx.scale(-1, 1); ctx.drawImage(im, -SPRITE_CX, sy);
+      ctx.save(); ctx.translate(sx, 0); ctx.scale(-1, 1); ctx.drawImage(im, -SPRITE_CX, sy); ctx.restore();
     } else {
       ctx.drawImage(im, sx - SPRITE_CX, sy);
     }
-    ctx.restore();
     if (!p.connected) dither(sx - 24, sy + 18, 48, FOOT_ROW - 18, false);
   }
 
-  function drawTag(p) {
-    const sx = Math.round(p.x + PW / 2);
-    const top = Math.round(p.y) - 4;
+  // İsim etiketleri bir kez çizilip saklanır (her karede metin ölçmek yerine)
+  const tagCache = new Map();
+  function tagImage(p) {
     const col = p.connected ? p.color : P.slate;
+    const key = `${p.name}|${col}`;
+    let c = tagCache.get(key);
+    if (c) return c;
     ctx.font = FB(16);
     const w = Math.ceil(ctx.measureText(p.name).width / 2) * 2 + 14;
-    box(sx - w / 2 - 2, top - 22, w + 4, 22, P.ink, 2);
-    rect(ctx, col, sx - w / 2, top - 20, w, 18);
-    // Etiketin altında küçük ok
-    rect(ctx, P.ink, sx - 4, top - 2, 8, 2);
-    rect(ctx, P.ink, sx - 2, top, 4, 2);
-    text(p.name, sx, top - 6, FB(16), QUIZ.textColorFor(col), 'center', null);
-    if (phase === 'reveal') {
-      if (p.lastPoints > 0) text('+' + p.lastPoints, sx, top - 30, FT(12), P.lime, 'center');
-      else text('X', sx, top - 30, FT(16), P.red, 'center', P.ink);
+    c = makeCanvas(w + 4, 26, (g) => {
+      const prev = ctx; ctx = g;
+      try {
+        box(0, 0, w + 4, 22, P.ink, 2);
+        rect(g, col, 2, 2, w, 18);
+        rect(g, P.ink, (w + 4) / 2 - 4, 22, 8, 2);
+        rect(g, P.ink, (w + 4) / 2 - 2, 24, 4, 2);
+        text(p.name, (w + 4) / 2, 16, FB(16), QUIZ.textColorFor(col), 'center', null);
+      } finally { ctx = prev; }
+    });
+    if (tagCache.size > 200) tagCache.clear();
+    tagCache.set(key, c);
+    return c;
+  }
+
+  function drawTag(p) {
+    const sx = Math.round(p.rx + PW / 2);
+    const top = Math.round(p.ry) - 4;
+    const t = tagImage(p);
+    ctx.drawImage(t, sx - Math.floor(t.width / 2), top - 22);
+    // Doğru cevap serisi: puan değil, rozet (Kahoot'ta motivasyonu en çok rozet artırıyor)
+    let above = top - 28;
+    if (p.streak >= 2 && phase !== 'lobby') {
+      const label = 'SERİ ' + p.streak;
+      text(label, sx, above, FT(8), P.yellow, 'center');
+      above -= 14;
+    }
+    if (phase === 'reveal' && revealShown) {
+      const rise = Math.min(1, (phaseTime - SHOW_AT) / 0.4) * 10;
+      if (p.lastPoints > 0) text('+' + p.lastPoints, sx, above - rise, FT(12), P.lime, 'center');
+      else text('X', sx, above - rise, FT(16), P.red, 'center', P.ink);
     }
   }
 
   const BOX_H = 88, TIMER_W = 104;
-  function drawQuestionBox() {
+  function drawQuestionBox(part) {
     const q = currentQ();
     const showTimer = phase === 'question';
+    const tx = W - 16 - TIMER_W, cx = tx + TIMER_W / 2;
+    if (part === 'timer') {
+      if (phase === 'read') {
+        // Okuma süresi: cevaplar henüz kapalı
+        const k = Math.min(1, phaseTime / readTime);
+        text('OKU', cx, 64, FT(16), blink(3) ? P.yellow : P.white, 'center');
+        rect(ctx, P.steel, cx - 36, 70, 72, 8);
+        rect(ctx, P.cyan, cx - 36, 70, Math.round(72 * (1 - k)), 8);
+      } else if (showTimer) {
+        const left = Math.max(0, qTime - qElapsed);
+        const urgent = left <= 5;
+        text(String(Math.ceil(left)).padStart(2, '0'), cx, 64, FT(20), urgent && blink(4) ? P.red : P.white, 'center');
+        const segs = 8, filled = Math.ceil((left / qTime) * segs);
+        for (let s = 0; s < segs; s++) {
+          const col = s >= filled ? P.steel : (filled <= 2 ? P.red : filled <= 5 ? P.yellow : P.lime);
+          rect(ctx, col, cx - 36 + s * 9, 70, 7, 8);
+        }
+      } else {
+        text('--', cx, 64, FT(20), P.slate, 'center');
+      }
+      return;
+    }
     const qw = W - 32 - TIMER_W - 8;
     windowBox(16, 8, qw, BOX_H, P.navy, { light: P.blue });
     text(`SORU ${qIndex + 1}/${questions.length}`, 32, 34, FT(10), P.yellow);
+    if (isDouble()) text('SON SORU · 2X PUAN', qw + 4, 34, FT(10), P.lime, 'right');
     const fit = fitText(q.q, qw - 36, 44, 28, 14);
     const block = fit.lines.length * fit.size * 1.15;
     const top = 40 + (44 - block) / 2;
     fit.lines.forEach((ln, k) => text(ln, 32, top + fit.size * 0.9 + k * fit.size * 1.15, FB(fit.size), P.white));
 
-    // Süre penceresi
-    const tx = W - 16 - TIMER_W, cx = tx + TIMER_W / 2;
+    // Süre penceresi (çerçeve; içerik her karede ayrıca çizilir)
     windowBox(tx, 8, TIMER_W, BOX_H, P.ink);
     text('SÜRE', cx, 36, FT(8), P.silver, 'center', null);
-    if (showTimer) {
-      const left = Math.max(0, qTime - qElapsed);
-      const urgent = left <= 5;
-      text(String(Math.ceil(left)).padStart(2, '0'), cx, 64, FT(20), urgent && blink(4) ? P.red : P.white, 'center');
-      const segs = 8, filled = Math.ceil((left / qTime) * segs);
-      for (let s = 0; s < segs; s++) {
-        const col = s >= filled ? P.steel : (filled <= 2 ? P.red : filled <= 5 ? P.yellow : P.lime);
-        rect(ctx, col, cx - 36 + s * 9, 70, 7, 8);
-      }
-    } else {
-      text('--', cx, 64, FT(20), P.slate, 'center');
-    }
   }
 
   function drawLogo(x, y, size) {
@@ -745,9 +1021,6 @@
     text(`ODA ${roomCode}`, 36, 146, FT(16), P.cyan);
     text(`OYUNCU ${connectedCount()}/${QUIZ.MAX_PLAYERS}`, 300, 146, FT(12), P.white);
     text(`${questionSource} · ${questions.length} soru`, 36, 172, FB(16, false), P.silver);
-    if (connectedCount() === 0) {
-      if (blink(2)) text('OYUNCULAR BEKLENİYOR', 36, 194, FT(10), P.yellow);
-    } else if (blink(2)) text('BAŞLAMAK İÇİN ENTER', 36, 194, FT(10), P.lime);
 
     if (qrImage) {
       const s = qrImage.width;
@@ -755,14 +1028,6 @@
       windowBox(qx, qy, s + 12, s + 12, P.white, { border: P.white, plain: true });
       ctx.drawImage(qrImage, qx + 6, qy + 6);
     }
-  }
-
-  function drawCountdown() {
-    dither(0, 130, W, H - 130, true);
-    const n = Math.max(1, Math.ceil(COUNTDOWN - phaseTime));
-    text('HAZIR OL!', W / 2, 260, FT(24), cycle(8), 'center');
-    for (const [o, c] of [[8, P.ink], [4, P.red]]) text(String(n), W / 2 + o, 400 + o, FT(96), c, 'center', null);
-    text(String(n), W / 2, 400, FT(96), P.white, 'center', null);
   }
 
   function drawLeaderboard() {
@@ -773,18 +1038,31 @@
     text('İSİM', 220, 100, FT(10), P.silver, 'left', null);
     text('SKOR', W - 130, 100, FT(10), P.silver, 'right', null);
     const list = [...players.values()].sort((a, b) => b.score - a.score);
+    const before = [...players.values()].sort((a, b) => (b.score - b.lastPoints) - (a.score - a.lastPoints));
     const rowH = Math.min(30, 400 / Math.max(list.length, 1));
     const medal = [P.yellow, P.silver, P.orange];
+    const k = Math.min(1, phaseTime / 1.2);   // puanlar 1,2 sn içinde sayarak artar
     list.forEach((p, i) => {
       const y = 112 + i * rowH;
       const fs = rowH >= 26 ? 14 : 10;
       const col = medal[i] || P.white;
       text(`${i + 1}.`, 124, y + rowH * 0.7, FT(fs), col);
+      // Sıra değişimi oku
+      const moved = before.indexOf(p) - i;
+      if (moved !== 0 && qIndex > 0) {
+        const ax = 172, ay = Math.round(y + rowH / 2);
+        const c = moved > 0 ? P.lime : P.red, d = moved > 0 ? -1 : 1;
+        rect(ctx, c, ax - 1, ay - 1 * d, 2, 2);
+        rect(ctx, c, ax - 3, ay + 1 * d, 6, 2);
+        rect(ctx, c, ax - 5, ay + 3 * d, 10, 2);
+      }
       box(196, y + rowH / 2 - 7, 14, 14, P.ink, 2);
       rect(ctx, p.color, 198, y + rowH / 2 - 5, 10, 10);
       text(p.name, 220, y + rowH * 0.72, FB(Math.min(24, rowH - 4)), col);
+      if (p.streak >= 2) text('SERİ ' + p.streak, W - 380, y + rowH * 0.7, FT(8), P.yellow, 'right');
       if (p.lastPoints) text('+' + p.lastPoints, W - 300, y + rowH * 0.7, FT(fs - 2), P.lime, 'right');
-      text(pad6(p.score), W - 130, y + rowH * 0.7, FT(fs), col, 'right');
+      const shown = Math.round(p.score - p.lastPoints * (1 - k));
+      text(pad6(shown), W - 130, y + rowH * 0.7, FT(fs), col, 'right');
     });
   }
 
@@ -822,29 +1100,105 @@
     }
   }
 
-  function drawScene() {
-    ctx.drawImage(ui_img.background || background, 0, 0, W, H);
-    const inQuestion = ['countdown', 'question', 'reveal'].includes(phase);
+  // Değişmeyen katman (arka plan, tabelalar, platformlar, soru kutusu) bir kez çizilip saklanır.
+  // Sadece aşama ya da soru değişince yeniden çizilir.
+  const staticLayer = document.createElement('canvas');
+  staticLayer.width = W; staticLayer.height = H;
+  const staticCtx = staticLayer.getContext('2d');
+  staticCtx.imageSmoothingEnabled = false;
+  let staticKey = '';
+
+  function drawStatic() {
     const q = currentQ();
-    for (let i = 0; i < 4; i++) {
-      const dim = phase === 'reveal' && i !== q.correct;
-      if (inQuestion) drawSign(i, dim, phase === 'reveal' && i === q.correct);
-      drawPad(i, dim);
+    ctx.drawImage(ui_img.background || background, 0, 0, W, H);
+    const answersOpen = phase === 'question' || phase === 'reveal';
+    if (answersOpen) for (let i = 0; i < 4; i++) drawSign(i, phase === 'reveal' && i !== q.correct);
+    if (phase === 'read' || answersOpen) drawQuestionBox('static');
+    if (phase === 'lobby') drawLobby();
+  }
+
+  // Platform başına oyuncu sayıları (her karede, tek döngüde)
+  const zoneCount = [0, 0, 0, 0], answerCount = [0, 0, 0, 0];
+  const drawList = [];
+
+  function drawScene() {
+    const inQuestion = phase === 'read' || phase === 'question' || phase === 'reveal';
+    const lobbyKey = phase === 'lobby' ? `${roomCode}|${connectedCount()}|${questionSource}|${qrImage ? 1 : 0}` : '';
+    const key = `${phase}|${inQuestion ? qIndex : -1}|${questions.length}|${lobbyKey}`;
+    if (key !== staticKey) {
+      ctx = staticCtx;
+      try { drawStatic(); } finally { ctx = screenCtx; }
+      staticKey = key;
     }
-    const list = [...players.values()].sort((a, b) => a.y - b.y);
-    for (const p of list) drawPlayer(p);
-    for (const p of list) drawTag(p);
+    ctx.drawImage(staticLayer, 0, 0);
+    if (phase === 'reveal') drawHighlight(currentQ().correct);
+
+    zoneCount.fill(0); answerCount.fill(0);
+    drawList.length = 0;
+    for (const p of players.values()) {
+      if (p.zone >= 0) zoneCount[p.zone]++;
+      if (p.lastAnswer >= 0) answerCount[p.lastAnswer]++;
+      drawList.push(p);
+    }
+    for (let i = 0; i < 4; i++) drawPad(i);
+    // y'ye göre sırala (yerinde, yeni dizi üretmeden)
+    for (let i = 1; i < drawList.length; i++) {
+      const v = drawList[i]; let j = i - 1;
+      while (j >= 0 && drawList[j].ry > v.ry) { drawList[j + 1] = drawList[j]; j--; }
+      drawList[j + 1] = v;
+    }
+    for (const p of drawList) drawPlayer(p);
+    for (const p of drawList) drawTag(p);
 
     if (phase === 'connecting') {
       dither(0, 0, W, H, true);
       if (blink(2)) text('YÜKLENİYOR...', W / 2, H / 2, FT(24), P.white, 'center');
-    } else if (phase === 'lobby') drawLobby();
-    else if (inQuestion) {
-      drawQuestionBox();
-      if (phase === 'countdown') drawCountdown();
+    } else if (phase === 'lobby') {
+      // Lobi penceresi önbellekte; sadece yanıp sönen yazı her karede
+      if (blink(2)) {
+        if (connectedCount() === 0) text('OYUNCULAR BEKLENİYOR', 36, 194, FT(10), P.yellow);
+        else text('BAŞLAMAK İÇİN ENTER', 36, 194, FT(10), P.lime);
+      }
+    } else if (inQuestion) {
+      drawQuestionBox('timer');
+      if (phase === 'read') {
+        text('CEVAPLAR BİRAZDAN AÇILIYOR', W / 2, 160, FT(12), blink(2) ? P.white : P.cyan, 'center');
+        if (isDouble()) text('2X PUAN!', W / 2, 200, FT(24), cycle(8), 'center');
+      }
     } else if (phase === 'leaderboard') drawLeaderboard();
     else if (phase === 'final') drawFinal();
+
+    if (paused) {
+      dither(0, 0, W, H, true);
+      if (resumeAt) {
+        const n = Math.max(1, Math.ceil((resumeAt - performance.now()) / 1000));
+        text(String(n), W / 2, 320, FT(64), P.white, 'center');
+      } else {
+        text('DURAKLATILDI', W / 2, 270, FT(24), P.yellow, 'center');
+        text(autoPaused ? 'Sekme gizlendiği için durdu · devam için P' : 'Devam için P ya da Enter', W / 2, 310, FB(18), P.white, 'center');
+      }
+    }
+    if (showDebug) drawDebug();
   }
+
+  // Tanı ekranı: F tuşu ya da ?debug=1 — FPS ve oyuncuların gecikmesi
+  let showDebug = new URLSearchParams(location.search).get('debug') === '1';
+  const frameTimes = [];
+  function drawDebug() {
+    const avg = frameTimes.reduce((a, b) => a + b, 0) / Math.max(1, frameTimes.length);
+    const worst = Math.max(0, ...frameTimes);
+    const list = [...players.values()];
+    const h = 40 + list.length * 14;
+    rect(ctx, P.ink, 8, H - h - 8, 280, h);
+    text(`FPS ${Math.round(1000 / Math.max(1, avg))}  EN KÖTÜ ${Math.round(worst)}ms`, 16, H - h + 10, FT(8), P.lime, 'left', null);
+    text('OYUNCU      PING  BAĞLANTI', 16, H - h + 26, FT(8), P.silver, 'left', null);
+    list.forEach((p, i) => {
+      const ping = p.bot ? 'BOT' : (p.rtt ? Math.round(p.rtt) + 'ms' : '...') + (p.link ? ' ' + p.link : '');
+      const col = !p.connected ? P.slate : p.rtt > 150 ? P.red : p.rtt > 80 ? P.yellow : P.white;
+      text(`${p.name.slice(0, 10).padEnd(12, ' ')}${ping}`, 16, H - h + 40 + i * 14, FT(8), col, 'left', null);
+    });
+  }
+  window.addEventListener('keydown', (e) => { if (e.code === 'KeyF') showDebug = !showDebug; });
 
   // ---------------------------------------------------------------------------
   // Ana döngü
@@ -852,16 +1206,71 @@
   let last = 0;
   let statusTick = 0;
 
-  function frame(now) {
-    const dt = Math.min((now - last) / 1000 || 0, 1 / 30);
-    last = now;
-    elapsed += dt;
-    phaseTime += dt;
+  const STEP = 1 / 60;   // fizik her zaman saniyede 60 adım: FPS düşse de oyun hızı değişmez
+  let acc = 0;
+  let pingTick = 0;
 
-    if (phase === 'countdown' && phaseTime >= COUNTDOWN) setPhase('question');
+  function step(dt) {
+    elapsed += dt;
+    if (paused) {
+      if (resumeAt && performance.now() >= resumeAt) {
+        paused = false; resumeAt = 0; autoPaused = false;
+        AUDIO.play('question');
+        updateButtons();
+        for (const p of players.values()) sendStatus(p);
+      }
+      return;
+    }
+    phaseTime += dt;
+    if (phase === 'read' && phaseTime >= readTime) setPhase('question');
     if (phase === 'question') {
       qElapsed += dt;
+      // Son 5 saniye: tik sesleri ve hızlanan müzik
+      const left = Math.ceil(qTime - qElapsed);
+      if (left !== lastTickSec) {
+        lastTickSec = left;
+        if (left <= 5 && left > 0) { AUDIO.sfx('tickFast'); AUDIO.setTempo(1.3); }
+      }
       if (qElapsed >= qTime) lockAnswers();
+    }
+    if (phase === 'reveal') {
+      const q = currentQ();
+      if (phaseTime >= DROP_AT && PADS.every((pd) => pd.dropT < 0)) {
+        PADS.forEach((pd, i) => { if (i !== q.correct) pd.dropT = 0; });
+        AUDIO.sfx('crumble');
+      }
+      if (phaseTime >= SHOW_AT && !revealShown) {
+        revealShown = true;
+        const anyCorrect = [...players.values()].some((p) => p.lastPoints > 0);
+        AUDIO.sfx(anyCorrect ? 'correct' : 'wrong');
+        for (const p of players.values()) sendStatus(p);
+      }
+    }
+    for (const pd of PADS) {
+      if (pd.dropT >= 0) { pd.dropT += dt; pd.dy = 0.5 * 1600 * Math.max(0, pd.dropT - 0.15) ** 2; }
+    }
+    for (const p of players.values()) {
+      p.px = p.x; p.py = p.y;
+      updatePlayer(p, dt);
+    }
+  }
+
+  let linkTick = 0;
+  function frame(now) {
+    const frameDt = Math.min((now - last) / 1000 || 0, 0.25);
+    last = now;
+    frameTimes.push(frameDt * 1000);
+    if (frameTimes.length > 60) frameTimes.shift();
+
+    acc += frameDt;
+    let steps = 0;
+    while (acc >= STEP && steps < 8) { step(STEP); acc -= STEP; steps++; }
+    if (steps === 8) acc = 0;   // çok gerideysek yetişmeye çalışma
+    // Ara kare: fizik 60 Hz, ekran daha hızlıysa (120/144 Hz) konumlar arası yumuşak geçiş
+    const alpha = acc / STEP;
+    for (const p of players.values()) {
+      p.rx = p.px + (p.x - p.px) * alpha;
+      p.ry = p.py + (p.y - p.py) * alpha;
     }
 
     // Sessiz kalan bağlantıları kopmuş say
@@ -872,23 +1281,35 @@
         p.input = { l: false, r: false, j: false };
         updateButtons();
       }
-      updatePlayer(p, dt);
     }
 
-    statusTick += dt;
+    statusTick += frameDt;
     if (statusTick >= 1) {
       statusTick = 0;
       for (const p of players.values()) sendStatus(p);
     }
+    // Ping: saniyede bir, mümkünse hızlı kanaldan (gerçek oyun gecikmesini ölçer)
+    pingTick += frameDt;
+    if (pingTick >= 1) {
+      pingTick = 0;
+      const ts = performance.now();
+      for (const p of players.values()) if (!sendFast(p, { t: 'ping', ts })) send(p, { t: 'ping', ts });
+    }
+    linkTick += frameDt;
+    if (linkTick >= 3) { linkTick = 0; for (const p of players.values()) pollLink(p); }
 
     drawScene();
-
     requestAnimationFrame(frame);
   }
 
+  let pixelPerfect = false;   // Z: tam sayı ölçek (keskin) / ekranı doldur
   function resize() {
-    const barH = 64;
-    const s = Math.min(window.innerWidth / W, (window.innerHeight - barH) / H);
+    const barH = document.getElementById('bar').offsetHeight || 64;
+    let s = Math.min(window.innerWidth / W, (window.innerHeight - barH) / H);
+    if (pixelPerfect && s >= 1) {
+      const dpr = window.devicePixelRatio || 1;
+      s = Math.floor(s * dpr) / dpr;
+    }
     canvas.style.width = Math.floor(W * s) + 'px';
     canvas.style.height = Math.floor(H * s) + 'px';
   }
@@ -918,10 +1339,36 @@
     requestAnimationFrame((t) => { last = t; frame(t); });
   }).catch((e) => { ui.status.textContent = 'Görsel yüklenemedi: ' + e.message; });
 
+  // Yük testi: adrese ?bots=15 eklenirse sahte oyuncular katılır ve rastgele dolaşır
+  const BOTS = Math.min(QUIZ.MAX_PLAYERS, Number(new URLSearchParams(location.search).get('bots')) || 0);
+  if (BOTS) {
+    const names = ['Ada', 'Bora', 'Cem', 'Defne', 'Ece', 'Fırat', 'Gül', 'Hakan', 'Işıl', 'Jale', 'Kaan', 'Lale', 'Mert', 'Nil', 'Oya'];
+    const addBots = () => {
+      for (let i = 0; i < BOTS; i++) {
+        const p = createPlayer('bot' + i, names[i], CHAR_IDS[i % CHAR_IDS.length]);
+        p.connected = true; p.bot = true;
+        players.set(p.token, p);
+      }
+      updateButtons();
+      setInterval(() => {
+        for (const p of players.values()) {
+          if (!p.bot) continue;
+          p.lastSeen = performance.now();
+          const r = Math.random();
+          const x = r < 0.35 ? -1 : r < 0.7 ? 1 : 0;
+          const j = Math.random() < 0.3;
+          if (j && !p.input.j) p.jumpPressed = true;
+          p.input = { l: x < 0, r: x > 0, j, x };
+        }
+      }, 400);
+    };
+    const wait = setInterval(() => { if (phase === 'lobby') { clearInterval(wait); addBots(); } }, 100);
+  }
+
   // Testler için
   window.__host = {
     get phase() { return phase; }, get room() { return roomCode; }, get joinUrl() { return joinUrl; },
     get players() { return [...players.values()].map((p) => ({ name: p.name, zone: p.zone, score: p.score, connected: p.connected, x: p.x, y: p.y })); },
-    pads: PADS, primaryAction,
+    pads: PADS, primaryAction, renderOnce: () => drawScene(),
   };
 })();

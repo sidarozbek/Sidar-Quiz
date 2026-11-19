@@ -76,7 +76,7 @@
   let lastStatusAt = 0;
   let joined = false;
   let reconnecting = false;
-  const input = { l: false, r: false, j: false };
+  const input = { x: 0, j: false };   // x: analog çubuk -1..1, j: zıpla
 
   // ---------------------------------------------------------------------------
   // Bağlantı
@@ -111,7 +111,7 @@
 
   function openConn() {
     if (conn) { try { conn.close(); } catch (e) { /* yok */ } }
-    conn = peer.connect(QUIZ.ROOM_PREFIX + room, { reliable: true });
+    conn = peer.connect(QUIZ.ROOM_PREFIX + room, { reliable: true, serialization: 'json' });
     const thisConn = conn;
     const timer = setTimeout(() => {
       if (!thisConn.open) {
@@ -121,10 +121,30 @@
     }, 10000);
     conn.on('open', () => {
       clearTimeout(timer);
+      setupFast(thisConn);
       thisConn.send({ t: 'join', name: myName, token, char: CHARS[charIndex].id });
     });
     conn.on('data', onMessage);
     conn.on('close', () => { if (joined && conn === thisConn) scheduleReconnect(); });
+  }
+
+  // Girdi için sırasız ve kayıplı ayrı kanal (moderatördeki ile aynı id): kayıp bir paket sonrakileri bekletmez
+  let fast = null;
+  function setupFast(c) {
+    try {
+      fast = c.peerConnection.createDataChannel('fast', { negotiated: true, id: 5, ordered: false, maxRetransmits: 0 });
+      fast.onmessage = (e) => {
+        let m;
+        try { m = JSON.parse(e.data); } catch (err) { return; }
+        if (m.t === 'ping') sendFastRaw({ t: 'o', ts: m.ts });
+      };
+    } catch (e) { fast = null; }
+  }
+  function sendFastRaw(m) {
+    if (fast && fast.readyState === 'open' && fast.bufferedAmount < 1024) {
+      try { fast.send(JSON.stringify(m)); return true; } catch (e) { /* yedek */ }
+    }
+    return false;
   }
 
   function fail(msg) {
@@ -148,7 +168,7 @@
   // Kopmayı fark etmek için: moderatör her saniye durum gönderir
   setInterval(() => {
     if (!joined) return;
-    if (conn && conn.open) conn.send({ t: 'in', ...input });   // hem nabız hem güncel tuş durumu
+    if (conn && conn.open) sendInput(true);   // hem nabız hem güncel girdi
     if (performance.now() - lastStatusAt > 8000) scheduleReconnect();
   }, 2000);
 
@@ -163,10 +183,21 @@
       $('pad').hidden = false;
       $('rotate').hidden = false;
       document.body.classList.add('joined');
+      requestWakeLock();
       $('meName').textContent = msg.name;
       $('meChar').style.backgroundImage = `url(${spriteUrl(msg.char || CHARS[charIndex].id)})`;
       $('meDot').style.background = msg.color;
       document.documentElement.style.setProperty('--me', msg.color);
+      return;
+    }
+    if (msg.t === 'ping') { if (conn && conn.open) conn.send({ t: 'pong', ts: msg.ts }); return; }
+    if (msg.t === 'kicked') {
+      joined = false;
+      document.body.classList.remove('joined');
+      $('pad').hidden = true; $('rotate').hidden = true;
+      $('noroom').hidden = false;
+      $('noroom').querySelector('.window p').textContent = 'Moderatör seni bu oyundan çıkardı.';
+      try { peer.destroy(); } catch (e) { /* yok */ }
       return;
     }
     if (msg.t === 'st') render(msg);
@@ -177,6 +208,8 @@
   // ---------------------------------------------------------------------------
   const card = $('card');
   let lastPhase = '';
+  let lastHadResult = false;
+  let currentPhase = '';
 
   const badgeEl = $('badge');
 
@@ -191,21 +224,35 @@
 
   function render(s) {
     $('meScore').textContent = String(s.score).padStart(6, '0');
+    const sig = $('signal');
+    const bars = s.ping == null ? 0 : s.ping < 80 ? 3 : s.ping < 160 ? 2 : 1;
+    sig.dataset.bars = bars;
+    sig.title = s.ping == null ? 'Bağlantı ölçülüyor' : `Gecikme: ${s.ping} ms`;
     const L = (i) => QUIZ.ANSWERS[i].letter;
-    document.body.classList.toggle('locked', !(s.phase === 'lobby' || s.phase === 'question'));
+    currentPhase = s.phase;
+    const active = !s.paused && (s.phase === 'lobby' || s.phase === 'read' || s.phase === 'question');
+    document.body.classList.toggle('locked', !active);
 
-    if (s.phase !== lastPhase && navigator.vibrate) {
-      if (s.phase === 'question') navigator.vibrate(60);
-      if (s.phase === 'reveal') navigator.vibrate(s.last && s.last.points > 0 ? [40, 40, 40] : 200);
+    if (navigator.vibrate) {
+      if (s.phase !== lastPhase && s.phase === 'question') navigator.vibrate(60);
+      if (s.phase !== lastPhase && s.phase === 'reveal') navigator.vibrate(30);
+      if (s.phase === 'reveal' && s.last && !lastHadResult) navigator.vibrate(s.last.points > 0 ? [40, 40, 40] : 200);
     }
+    lastHadResult = !!(s.phase === 'reveal' && s.last);
     lastPhase = s.phase;
+    const streak = s.streak >= 2 ? ` · SERİ ${s.streak}` : '';
+
+    if (s.paused) {
+      showMessage(QUIZ.PAL.steel, 'DURAKLATILDI', 'Moderatör oyunu kısa bir süre durdurdu.');
+      return;
+    }
 
     switch (s.phase) {
       case 'lobby':
         showMessage(null, 'KATILDIN!', 'Oyunun başlamasını bekle. Bu arada karakterini büyük ekranda yürütebilirsin.');
         break;
-      case 'countdown':
-        showMessage(QUIZ.PAL.plum, `SORU ${s.q}/${s.n}`, 'Hazır ol! Büyük ekrana bak.');
+      case 'read':
+        showMessage(QUIZ.PAL.plum, `SORU ${s.q}/${s.n}${s.double ? ' · 2X' : ''}`, 'Soruyu büyük ekrandan oku. Cevaplar birazdan açılacak, şimdiden yerini alabilirsin.');
         break;
       case 'question':
         if (s.zone >= 0) {
@@ -217,8 +264,8 @@
         break;
       case 'reveal': {
         const r = s.last;
-        if (!r) break;
-        if (r.points > 0) showMessage(QUIZ.PAL.green, `DOĞRU! +${r.points}`, `Sıralaman: ${s.rank} / ${s.total}`, r.correct, QUIZ.PAL.ink);
+        if (!r) { showMessage(QUIZ.PAL.steel, 'KİLİTLENDİ!', 'Büyük ekrana bak…'); break; }
+        if (r.points > 0) showMessage(QUIZ.PAL.green, `DOĞRU! +${r.points}`, `Sıralaman: ${s.rank} / ${s.total}${streak}`, r.correct, QUIZ.PAL.ink);
         else if (r.answer < 0) showMessage(QUIZ.PAL.steel, 'CEVAP YOK', `Doğru cevap: ${L(r.correct)}`, r.correct);
         else showMessage(QUIZ.PAL.red, 'YANLIŞ', `Sen ${L(r.answer)} dedin, doğru cevap ${L(r.correct)}`, r.correct);
         break;
@@ -237,29 +284,102 @@
   // ---------------------------------------------------------------------------
   // Kontroller
   // ---------------------------------------------------------------------------
-  function sendInput() {
-    if (conn && conn.open) conn.send({ t: 'in', ...input });
+  // Girdinin üç kaynağı: analog çubuk, A düğmesi, klavye (bilgisayardan katılanlar için)
+  const stickState = { x: 0, up: false };
+  const keys = { l: false, r: false, j: false };
+  let aHeld = false;
+
+  // Gönderim: oyun aşamalarında (lobi, okuma, soru) değişmese de sabit 30 Hz — telefonun Wi-Fi'si uyuklamasın,
+  // kaybolan paketin yerini hemen yenisi alsın. Diğer aşamalarda sadece değişince ve 2 sn'de bir nabız.
+  let seq = 0;
+  let jumpCount = 0;     // her zıplama basışında artar: kayıp pakette kısa dokunuş kaybolmaz
+  let lastSent = { x: null, j: null };
+  function sendInput(force) {
+    const changed = input.x !== lastSent.x || input.j !== lastSent.j;
+    if (!force && !changed) return;
+    const m = { t: 'i', s: ++seq, x: input.x, j: input.j, jc: jumpCount };
+    if (!sendFastRaw(m)) {
+      if (conn && conn.open) conn.send({ t: 'in', x: input.x, j: input.j, jc: jumpCount });
+      else return;
+    }
+    lastSent = { x: input.x, j: input.j };
+  }
+  setInterval(() => {
+    if (joined && (currentPhase === 'lobby' || currentPhase === 'read' || currentPhase === 'question')) sendInput(true);
+  }, 33);
+
+  function updateInput() {
+    const kx = (keys.r ? 1 : 0) - (keys.l ? 1 : 0);
+    input.x = stickState.x !== 0 ? stickState.x : kx;
+    const j = aHeld || stickState.up || keys.j;
+    if (j && !input.j) jumpCount++;
+    input.j = j;
+    sendInput();
   }
 
-  // Aynı tuşa birden çok düğme bağlı olabilir (yukarı ok ve A ikisi de zıplatır)
-  const held = { l: new Set(), r: new Set(), j: new Set() };
-  for (const btn of document.querySelectorAll('.ctl')) {
-    const k = btn.dataset.key;
-    const set = (v) => (e) => {
-      e.preventDefault();
-      if (v) held[k].add(btn); else held[k].delete(btn);
-      btn.classList.toggle('down', v);
-      const now = held[k].size > 0;
-      if (input[k] === now) return;
-      input[k] = now;
-      sendInput();
-    };
-    btn.addEventListener('pointerdown', (e) => { btn.setPointerCapture(e.pointerId); set(true)(e); });
-    btn.addEventListener('pointerup', set(false));
-    btn.addEventListener('pointercancel', set(false));
-    btn.addEventListener('lostpointercapture', set(false));
-    btn.addEventListener('contextmenu', (e) => e.preventDefault());
+  // --- Analog çubuk ---
+  const stick = $('stick');
+  const knob = $('knob');
+  const DEAD = 0.18;        // ölü bölge: küçük titremeler karakteri yürütmesin
+  const UP_ON = 0.6, UP_OFF = 0.3;   // yukarı itince zıpla; tekrar için önce 0,3'ün altına in
+  const UP_CONE = 50 * Math.PI / 180;  // dikeyden en fazla ±50° sapma (çapraz yürürken zıplamasın)
+  let stickPointer = null;
+
+  function stickMove(e) {
+    const r = stick.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const max = r.width * 0.32;
+    let dx = e.clientX - cx, dy = e.clientY - cy;
+    const len = Math.hypot(dx, dy);
+    if (len > max) { dx = (dx / len) * max; dy = (dy / len) * max; }
+    // Topuz 2 piksellik adımlarla hareket etsin (retro his)
+    knob.style.transform = `translate(${Math.round(dx / 2) * 2}px, ${Math.round(dy / 2) * 2}px)`;
+    let nx = dx / max;
+    const ny = dy / max;
+    nx = Math.abs(nx) < DEAD ? 0 : Math.sign(nx) * (Math.abs(nx) - DEAD) / (1 - DEAD);
+    stickState.x = Math.round(nx * 10) / 10;   // 0.1'lik adımlar: gereksiz mesaj olmasın
+    const ang = Math.abs(Math.atan2(dx / max, -ny));   // dikeyden sapma açısı
+    if (stickState.up) { if (-ny < UP_OFF) stickState.up = false; }
+    else if (-ny > UP_ON && ang < UP_CONE) stickState.up = true;
+    stick.classList.toggle('up', stickState.up);
+    updateInput();
   }
+  function stickEnd(e) {
+    if (e && stickPointer !== e.pointerId) return;
+    stickPointer = null;
+    stickState.x = 0; stickState.up = false;
+    knob.style.transform = '';
+    stick.classList.remove('active', 'up');
+    updateInput();
+  }
+  // Sol tarafın tamamı dokunma alanı: parmak çubuğun tam üstüne gelmese de çalışır
+  const stickArea = document.querySelector('.side.left');
+  stickArea.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    stickPointer = e.pointerId;
+    stickArea.setPointerCapture(e.pointerId);
+    stick.classList.add('active');
+    stickMove(e);
+  });
+  stickArea.addEventListener('pointermove', (e) => { if (e.pointerId === stickPointer) stickMove(e); });
+  stickArea.addEventListener('pointerup', stickEnd);
+  stickArea.addEventListener('pointercancel', stickEnd);
+  stickArea.addEventListener('lostpointercapture', stickEnd);
+  stickArea.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // --- A (zıpla) düğmesi ---
+  const aBtn = document.querySelector('.abtn');
+  const aSet = (v) => (e) => {
+    e.preventDefault();
+    aHeld = v;
+    aBtn.classList.toggle('down', v);
+    updateInput();
+  };
+  aBtn.addEventListener('pointerdown', (e) => { aBtn.setPointerCapture(e.pointerId); aSet(true)(e); });
+  aBtn.addEventListener('pointerup', aSet(false));
+  aBtn.addEventListener('pointercancel', aSet(false));
+  aBtn.addEventListener('lostpointercapture', aSet(false));
+  aBtn.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // Tam ekran + yatay kilit (Android'de çalışır; iPhone'da "yan çevir" uyarısı devreye girer)
   function goLandscape() {
@@ -271,12 +391,29 @@
       .catch(() => { /* desteklenmiyor */ });
   }
 
-  // Ekran dik/yatay değişince basılı kalmış tuşları bırak
+  // Ekran kararmasın (iOS 18.4+ ve diğer tarayıcılar)
+  let wakeLock = null;
+  async function requestWakeLock() {
+    try { if (navigator.wakeLock && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) { /* desteklenmiyor */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && joined) requestWakeLock();
+    else releaseAll();
+  });
+  window.addEventListener('blur', () => releaseAll());
+  function releaseAll() {
+    stickEnd({ pointerId: stickPointer });
+    aHeld = false; aBtn.classList.remove('down');
+    keys.l = keys.r = keys.j = false;
+    updateInput();
+  }
+
+  // Ekran dik/yatay değişince basılı kalmış her şeyi bırak
   window.addEventListener('orientationchange', () => {
-    for (const k of Object.keys(held)) held[k].clear();
-    input.l = input.r = input.j = false;
-    document.querySelectorAll('.ctl.down').forEach((b) => b.classList.remove('down'));
-    sendInput();
+    stickEnd({ pointerId: stickPointer });
+    aHeld = false; aBtn.classList.remove('down');
+    keys.l = keys.r = keys.j = false;
+    updateInput();
   });
 
   // Bilgisayardan katılanlar için klavye
@@ -285,9 +422,9 @@
     const k = KEYS[e.code];
     if (!k || !joined) return;
     e.preventDefault();
-    if (input[k] === v) return;
-    input[k] = v;
-    sendInput();
+    if (keys[k] === v) return;
+    keys[k] = v;
+    updateInput();
   };
   window.addEventListener('keydown', onKey(true));
   window.addEventListener('keyup', onKey(false));

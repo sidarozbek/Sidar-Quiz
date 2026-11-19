@@ -19,14 +19,44 @@ Renkleri değiştirmek istersen hepsi `js/common.js` dosyasındaki `PAL`, `ANSWE
    - **Karakterini seç:** 6 karakterden birini seçer (aynı adam, farklı takım elbise ve kravat renkleriyle).
    - **Adını yaz:** seçtiği karakterin önizlemesini görür, adını yazar ve katılır.
 
-   Katıldıktan sonra telefon yatay bir el konsoluna dönüşür: solda yön tuşları, ortada ekran, sağda **A (ZIPLA)** düğmesi. Telefon dik tutulursa "yan çevir" uyarısı çıkar. Android'de telefon kendiliğinden tam ekrana ve yatay moda geçer.
+   Katıldıktan sonra telefon yatay bir el konsoluna dönüşür: solda **analog çubuk**, ortada ekran, sağda **A (ZIPLA)** düğmesi. Çubuğu ne kadar itersen karakter o kadar hızlı yürür; yukarı itmek de zıplatır. Ekranın sağ üstündeki üç çizgi bağlantı kalitesini gösterir. Telefon dik tutulursa "yan çevir" uyarısı çıkar. Android'de telefon kendiliğinden tam ekrana ve yatay moda geçer.
 3. Herkes katılınca moderatör **Oyunu başlat** düğmesine basar.
-4. Her soruda 3 saniyelik geri sayımdan sonra karakterler yerde başlar. Oyuncular konsoldaki yön tuşları ve **A** düğmesiyle (yukarı ok da zıplatır) doğru bildikleri cevabın platformuna çıkar. Fikrini değiştiren platformdan inip başka birine zıplayabilir.
-5. Süre bitince ya da moderatör **Onayla** düğmesine basınca, kimin hangi platformda durduğu cevabı olarak sayılır. Yerde kalan cevap vermemiş olur.
-6. Doğru cevap verenler en fazla 1000 puan alır. Platforma ne kadar erken çıkıp orada kalırsan o kadar çok puan alırsın (süre sonunda en az 500).
-7. Moderatör **Devam** ile puan tablosuna, oradan sonraki soruya geçer. En sonda ilk üç kürsüye çıkar.
+4. **Okuma süresi:** Her soru önce tek başına gelir. Soru uzunluğuna göre 3–8 saniye cevaplar kapalı kalır, herkes soruyu okuyabilir. Bu sırada karakterler serbestçe yürüyebilir.
+5. **Cevap süresi:** Cevaplar dört tabelada açılır. Oyuncular analog çubuk ve **A** düğmesiyle doğru bildikleri cevabın platformuna çıkar. Fikrini değiştiren platformdan inip başka birine zıplayabilir. Platformların üstünde kaç kişinin durduğu canlı görünür.
+6. **Açıklama:** Süre bitince ya da moderatör **Onayla**'ya basınca cevaplar kilitlenir. Yanlış platformlar üstlerindekilerle birlikte çöker, doğru cevap parlar, puanlar karakterlerin üstünde belirir. Telefonlar sonucu büyük ekranla aynı anda gösterir.
+7. **Puanlama (Kahoot formülü):** Doğru cevap en fazla 1000, en az 500 puan. Platforma ne kadar erken yerleşirsen o kadar çok puan alırsın. İlk 0,5 saniye içinde yerleşene tam puan verilir. Sayılan an, oyuncunun **son kez** platforma yerleştiği andır. Üst üste doğru cevaplar karakterin üstünde **SERİ** rozeti olarak görünür. **Son soru 2 kat puandır.**
+8. Moderatör **Devam** ile puan tablosuna, oradan sonraki soruya geçer. En sonda ilk üç kürsüye çıkar.
 
-Moderatör ekranında **Enter** tuşu o anki ana düğmeye basar.
+## Moderatör kontrolleri
+
+| Tuş | Düğme | Ne yapar |
+| --- | --- | --- |
+| Enter / Boşluk | Ana düğme | Başlat, okumayı kısalt, kilitle, açıklamayı hızlandır, devam |
+| P | Duraklat | Soruyu durdurur; devam edince 3-2-1 sayar |
+| T | +10 sn | Cevap süresine 10 saniye ekler |
+| S | Atla | Soruyu puansız geçer |
+| L | Katılım | Yeni oyuncuların katılımını kilitler/açar (kopanlar yine dönebilir) |
+| M | Ses | Müziği ve efektleri açar/kapatır |
+| F | | FPS, ping ve bağlantı türü ekranı |
+| C | | Tarama çizgisi (CRT) efektini açar/kapatır |
+| Z | | Tam sayı ölçek (en keskin piksel) / ekranı doldur |
+| | Karaktere tıkla | O oyuncuyu oyundan çıkarır (onay sorar) |
+
+Moderatör sekmesi gizlenirse (başka sekmeye geçilirse) oyun kendiliğinden duraklar.
+
+## Ses
+
+Müzik ve efektler sadece büyük ekranda çalar, kodla üretilir (dosya yok). Tarayıcı kuralı gereği ses, moderatör sayfaya ilk tıkladığında açılır. Efektler [ZzFX](https://github.com/KilledByAPixel/ZzFX) ile (MIT lisansı), müzik kendi yazdığımız küçük bir chiptune çalıcıyla.
+
+## Takılma ve gecikme sorunları
+
+- Moderatör ekranında **F** tuşuna basınca sol altta FPS ve her oyuncunun gecikmesi (ping) görünür. 80 ms altı iyi, 150 ms üstü yavaş sayılır.
+- Bilgisayarın oyunu kaldırıp kaldırmadığını denemek için adrese `?bots=15` ekle (`host.html?bots=15`): 15 sahte oyuncu katılır ve rastgele dolaşır.
+- FPS düşük olsa bile oyunun hızı değişmez; fizik her zaman saniyede 60 adım çalışır.
+- Ping yüksekse sorun ağdadır: telefonlarla moderatör bilgisayarının aynı Wi-Fi'de olması gecikmeyi en çok düşüren şeydir.
+- F ekranındaki **bağlantı türü**: `LAN` en iyisi (aynı ağ), `NAT` internet üzerinden doğrudan, `TURN` aracı sunucu üzerinden (en yavaşı). Çoğu oyuncu TURN görünüyorsa ya da hiç bağlanamıyorsa okul/şirket ağı doğrudan bağlantıyı engelliyor demektir: `js/config.js` dosyasındaki açıklamaya göre ücretsiz bir 443 portlu TURN sunucusu ekle.
+- Oyuncuların hareketleri ayrı, **sırasız ve kayıplı** bir veri kanalından gider: kaybolan bir paket sonrakileri bekletmez. Telefonlar oyun sırasında saniyede 30 kez gönderir; bu, telefonun Wi-Fi'sinin uyuklamasını da önler.
+- Telefonların ve moderatör bilgisayarının ekranı oyun sırasında kararmaz (Wake Lock; iPhone'da iOS 18.4 ve sonrası).
 
 ## GitHub Pages'te yayınlama
 
@@ -108,12 +138,15 @@ css/style.css         Bütün sayfaların stili
 assets/sprites/       Karakter kareleri (her karakter ayrı klasörde, 128x128 PNG)
 assets/ui/            Arka plan, tabela, pencere ve platform görselleri
 fonts/                Piksel fontlar (Press Start 2P, Pixelify Sans)
-vendor/               PeerJS ve QR kod kütüphaneleri (MIT lisanslı)
+js/audio.js           Müzik ve ses efektleri
+js/config.js          İsteğe bağlı TURN sunucusu ayarı
+vendor/               PeerJS, QR kod ve ZzFX kütüphaneleri (MIT lisanslı)
 ```
 
 ## Lisanslar
 
 - [PeerJS](https://github.com/peers/peerjs): MIT
 - [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator): MIT
+- [ZzFX](https://github.com/KilledByAPixel/ZzFX): MIT
 - [Press Start 2P](https://fonts.google.com/specimen/Press+Start+2P) ve [Pixelify Sans](https://fonts.google.com/specimen/Pixelify+Sans): SIL Open Font License (lisans metinleri `fonts/` klasöründe)
 - Renk paleti: [Sweetie 16](https://lospec.com/palette-list/sweetie-16), GrafxKid

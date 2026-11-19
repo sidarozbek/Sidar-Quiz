@@ -186,9 +186,9 @@ body.host { overflow: hidden; height: 100vh; }
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background:
-    repeating-linear-gradient(to bottom, rgba(26, 28, 44, 0.14) 0, rgba(26, 28, 44, 0.14) 1px, transparent 1px, transparent 3px),
-    radial-gradient(ellipse at center, transparent 70%, rgba(26, 28, 44, 0.35) 100%);
+  /* Sadece tarama çizgileri; ayrı katmanda tutulur, her karede yeniden hesaplanmaz */
+  background: repeating-linear-gradient(to bottom, rgba(26, 28, 44, 0.14) 0, rgba(26, 28, 44, 0.14) 1px, transparent 1px, transparent 3px);
+  will-change: transform;
 }
 #stage { display: block; image-rendering: pixelated; }
 #bar {
@@ -499,3 +499,69 @@ body.locked .abtn, body.locked .dpad { filter: grayscale(1) brightness(0.55); }
   background: rgba(26, 28, 44, 0.25);
   box-shadow: inset 0 0 0 4px var(--card-text);
 }
+
+/* ---------------------------------------------------------------------------
+   Analog çubuk
+   --------------------------------------------------------------------------- */
+.side.left { touch-action: none; cursor: grab; }
+.stick {
+  --size: calc(var(--unit) * 2.7);
+  position: relative;
+  width: var(--size);
+  height: var(--size);
+  filter: drop-shadow(0 6px 0 var(--ink));
+  pointer-events: none;
+}
+/* Piksel daire kesimi (A düğmesiyle aynı) */
+.stick-base, .stick-knob {
+  position: absolute;
+  clip-path: polygon(30% 0, 70% 0, 70% 6%, 85% 6%, 85% 15%, 94% 15%, 94% 30%, 100% 30%, 100% 70%, 94% 70%, 94% 85%, 85% 85%, 85% 94%, 70% 94%, 70% 100%, 30% 100%, 30% 94%, 15% 94%, 15% 85%, 6% 85%, 6% 70%, 0 70%, 0 30%, 6% 30%, 6% 15%, 15% 15%, 15% 6%, 30% 6%);
+}
+.stick-base {
+  inset: 0;
+  background:
+    linear-gradient(var(--ink), var(--ink)) center / 4px 70% no-repeat,
+    linear-gradient(var(--ink), var(--ink)) center / 70% 4px no-repeat,
+    var(--steel);
+  box-shadow: inset 0 6px 0 var(--slate), inset 0 -8px 0 var(--ink);
+  opacity: 0.95;
+}
+/* Yön işaretleri */
+.stick-base::before, .stick-base::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  margin-top: -6px;
+  border: 6px solid transparent;
+}
+.stick-base::before { left: 7%; border-right: 8px solid var(--silver); border-left: 0; }
+.stick-base::after { right: 7%; border-left: 8px solid var(--silver); border-right: 0; }
+.stick-knob {
+  width: 46%;
+  height: 46%;
+  left: 27%;
+  top: 27%;
+  background: var(--silver);
+  box-shadow: inset 0 6px 0 var(--white), inset 0 -8px 0 var(--slate), inset 6px 0 0 var(--white), inset -6px 0 0 var(--slate);
+  transition: transform 0.06s steps(2);
+}
+.stick.active .stick-knob { transition: none; background: var(--white); }
+.stick.up .stick-knob { background: var(--yellow); }
+.side-label { font-family: var(--title); font-size: 10px; color: var(--yellow); text-shadow: 2px 2px 0 var(--ink); }
+body.locked .stick { filter: grayscale(1) brightness(0.55) drop-shadow(0 6px 0 var(--ink)); }
+
+/* Sinyal göstergesi (bağlantı gecikmesi) */
+.signal { margin-left: auto; display: inline-flex; align-items: flex-end; gap: 2px; height: 10px; }
+.signal i { width: 3px; background: var(--slate); }
+.signal i:nth-child(1) { height: 4px; }
+.signal i:nth-child(2) { height: 7px; }
+.signal i:nth-child(3) { height: 10px; }
+.signal[data-bars="1"] i:nth-child(1) { background: var(--red); }
+.signal[data-bars="2"] i:nth-child(-n+2) { background: var(--yellow); }
+.signal[data-bars="3"] i { background: var(--lime); }
+
+/* Moderatör çubuğu: küçük düğmeler */
+.btn.small { padding: 10px 12px 13px; font-size: 9px; }
+.bar-sep { width: 2px; height: 28px; background: var(--steel); }
+#bar { flex-wrap: wrap; justify-content: center; height: auto; min-height: 64px; padding: 6px 0; }
+.crt.no-crt::after { display: none; }

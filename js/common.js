@@ -63,6 +63,16 @@ const QUIZ = {
       opts.path = p.get('peerpath') || '/';
       opts.secure = p.get('peersecure') === '1';
     }
+    // ICE sunucuları: PeerJS'in varsayılanları + js/config.js'te tanımlıysa kendi TURN sunucun.
+    // Dikkat: config verilince PeerJS varsayılanları silinir; bu yüzden hepsi açıkça yazılır.
+    const extra = (window.SIDAR_CONFIG && window.SIDAR_CONFIG.iceServers) || [];
+    opts.config = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
+        ...extra,
+      ],
+    };
     return opts;
   },
 
