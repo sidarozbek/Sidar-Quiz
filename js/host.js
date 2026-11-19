@@ -204,6 +204,7 @@
   let qrImage = null;
   let peer = null;
   let elapsed = 0;
+  const NO_FAST = new URLSearchParams(location.search).get('nofast') === '1';   // tanı: hızlı kanalı kapat
   let readTime = 4;
   let paused = false, resumeAt = 0, autoPaused = false;
   let joinLocked = false;
@@ -273,7 +274,7 @@
     });
 
     peer.on('connection', (conn) => {
-      conn.on('open', () => setupFast(conn));
+      conn.on('open', () => { if (!NO_FAST) setupFast(conn); });
       conn.on('data', (msg) => onMessage(conn, msg));
       conn.on('close', () => onClose(conn));
       conn.on('error', () => onClose(conn));
@@ -318,6 +319,9 @@
     try {
       const ch = conn.peerConnection.createDataChannel('fast', { negotiated: true, id: 5, ordered: false, maxRetransmits: 0 });
       conn._fast = ch;
+      // El sıkışma: telefon bu mesajı alana kadar hızlı kanalı kullanmaz
+      const hello = () => { try { ch.send(JSON.stringify({ t: 'hi' })); } catch (e) { /* kapalı */ } };
+      if (ch.readyState === 'open') hello(); else ch.onopen = hello;
       ch.onmessage = (e) => {
         let m;
         try { m = JSON.parse(e.data); } catch (err) { return; }
@@ -395,6 +399,11 @@
       const token = String(msg.token || '').slice(0, 40);
       const name = String(msg.name || '').trim().slice(0, 12) || 'Oyuncu';
       const char = CHAR_IDS.includes(msg.char) ? msg.char : CHAR_IDS[0];
+      if (msg.v !== QUIZ.VERSION) {
+        conn.send({ t: 'error', msg: 'Oyunun yeni sürümü yüklendi. Sayfayı yenileyip QR kodu tekrar okut.' });
+        setTimeout(() => conn.close(), 500);
+        return;
+      }
       p = players.get(token);
       if (kicked.has(token)) {
         conn.send({ t: 'error', msg: 'Moderatör seni bu oyundan çıkardı.' });

@@ -122,26 +122,32 @@
     conn.on('open', () => {
       clearTimeout(timer);
       setupFast(thisConn);
-      thisConn.send({ t: 'join', name: myName, token, char: CHARS[charIndex].id });
+      thisConn.send({ t: 'join', name: myName, token, char: CHARS[charIndex].id, v: QUIZ.VERSION });
     });
     conn.on('data', onMessage);
     conn.on('close', () => { if (joined && conn === thisConn) scheduleReconnect(); });
   }
 
   // Girdi için sırasız ve kayıplı ayrı kanal (moderatördeki ile aynı id): kayıp bir paket sonrakileri bekletmez
+  // Kanal "açık" görünse bile karşı taraf dinliyor olmayabilir (örn. moderatörde eski sürüm).
+  // Bu yüzden moderatörden bu kanaldan ilk mesaj gelene kadar hareketler güvenilir yoldan gider.
   let fast = null;
+  let fastOk = false;
   function setupFast(c) {
+    fastOk = false;
     try {
       fast = c.peerConnection.createDataChannel('fast', { negotiated: true, id: 5, ordered: false, maxRetransmits: 0 });
       fast.onmessage = (e) => {
         let m;
         try { m = JSON.parse(e.data); } catch (err) { return; }
+        fastOk = true;
         if (m.t === 'ping') sendFastRaw({ t: 'o', ts: m.ts });
       };
+      fast.onclose = () => { fastOk = false; };
     } catch (e) { fast = null; }
   }
   function sendFastRaw(m) {
-    if (fast && fast.readyState === 'open' && fast.bufferedAmount < 1024) {
+    if (fast && fastOk && fast.readyState === 'open' && fast.bufferedAmount < 1024) {
       try { fast.send(JSON.stringify(m)); return true; } catch (e) { /* yedek */ }
     }
     return false;

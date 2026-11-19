@@ -115,6 +115,12 @@ host.html?peerhost=sunucu.adresin.com&peerport=443&peerpath=/myapp&peersecure=1
 
 Bu parametreler QR koda da eklenir, oyuncular otomatik olarak aynı sunucuyu kullanır.
 
+## Güncelleme yaparken
+
+- GitHub'a **bütün dosyaları birlikte** yükle. Sadece bazı dosyaları değiştirirsen moderatör ekranıyla telefonlar farklı sürümler çalıştırabilir.
+- Sürüm `js/common.js` içindeki `VERSION` değerindedir. Telefon farklı sürümle katılmaya çalışırsa "sayfayı yenile" uyarısı alır.
+- GitHub Pages dosyaları 10 dakikaya kadar önbellekte tutabilir. Yükledikten sonra moderatör sayfasını bir kez yenile (Ctrl+F5).
+
 ## Yerelde çalıştırma
 
 ```bash
