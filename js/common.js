@@ -3,7 +3,7 @@
 
 const QUIZ = {
   // Moderatör ve telefon aynı sürümü çalıştırmalı (eski önbellekli dosyalar karışmasın)
-  VERSION: '2026.11.19d',
+  VERSION: '2026.11.19f',
 
   // PeerJS kimliklerinin başına eklenir; başka uygulamalarla çakışmayı önler.
   ROOM_PREFIX: 'sidar-quiz-',
@@ -37,6 +37,21 @@ const QUIZ = {
   // Seçilebilir karakterler (assets/sprites/<id>/ klasörleri)
   CHARACTERS: [
     { id: 'kahve', name: 'KAHVE' },
+    { id: 'subay', name: 'SUBAY' },
+    { id: 'aydin', name: 'AYDIN' },
+    { id: 'eylemci', name: 'EYLEMCI' },
+    { id: 'yetmisler', name: "70'LER" },
+    { id: 'uykucu', name: 'UYKUCU' },
+    { id: 'basketbolcu', name: 'BASKETBOLCU' },
+    { id: 'asci', name: 'AŞÇI' },
+    { id: 'doktor', name: 'DOKTOR' },
+    { id: 'kovboy', name: 'KOVBOY' },
+    { id: 'astronot', name: 'ASTRONOT' },
+    { id: 'korsan', name: 'KORSAN' },
+    { id: 'rockci', name: 'ROCKÇI' },
+    { id: 'itfaiyeci', name: 'ITFAIYECI' },
+    { id: 'ressam', name: 'RESSAM' },
+    { id: 'dedektif', name: 'DEDEKTIF' },
     { id: 'lacivert', name: 'LACIVERT' },
     { id: 'gri', name: 'GRI' },
     { id: 'bordo', name: 'BORDO' },

@@ -406,8 +406,8 @@ body.locked .abtn, body.locked .dpad { filter: grayscale(1) brightness(0.55); }
 
 #charGrid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
   width: 100%;
   max-width: 360px;
 }
@@ -425,9 +425,9 @@ body.locked .abtn, body.locked .dpad { filter: grayscale(1) brightness(0.55); }
   position: absolute;
   left: 50%;
   bottom: 4px;
-  width: 128px;
-  height: 128px;
-  margin-left: -64px;
+  width: 112px;
+  height: 112px;
+  margin-left: -56px;
   image-rendering: pixelated;
   pointer-events: none;
 }

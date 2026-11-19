@@ -16,7 +16,7 @@ Renkleri değiştirmek istersen hepsi `js/common.js` dosyasındaki `PAL`, `ANSWE
 
 1. **Moderatör** sitenin adresini açar ve **OYUN KUR** düğmesine basar. Ekranı projeksiyona ya da büyük bir ekrana yansıtır. Ekranda oda kodu ve QR kod çıkar.
 2. **Oyuncular** QR kodu telefonlarının kamerasıyla okutur. Oyuna sadece QR ile katılınır; sitenin ana adresi sadece oyun kurmaya yarar. Katılma iki adımdır:
-   - **Karakterini seç:** 6 karakterden birini seçer (aynı adam, farklı takım elbise ve kravat renkleriyle).
+   - **Karakterini seç:** 21 karakterden birini seçer: 15 skin (Subay, Aydın, Eylemci, 70'ler, Uykucu, Basketbolcu, Aşçı, Doktor, Kovboy, Astronot, Korsan, Rockçı, İtfaiyeci, Ressam, Dedektif) ve 6 takım elbise rengi.
    - **Adını yaz:** seçtiği karakterin önizlemesini görür, adını yazar ve katılır.
 
    Katıldıktan sonra telefon yatay bir el konsoluna dönüşür: solda **analog çubuk**, ortada ekran, sağda **A (ZIPLA)** düğmesi. Çubuğu ne kadar itersen karakter o kadar hızlı yürür; yukarı itmek de zıplatır. Ekranın sağ üstündeki üç çizgi bağlantı kalitesini gösterir. Telefon dik tutulursa "yan çevir" uyarısı çıkar. Android'de telefon kendiliğinden tam ekrana ve yatay moda geçer.
